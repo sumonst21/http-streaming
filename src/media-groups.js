@@ -60,7 +60,7 @@ export const startLoaders = (playlistLoader, mediaType) => {
  * change of group is merely a rendition switch of the same content at another encoding,
  * rather than a change of content, such as switching audio from English to Spanish.
  *
- * @param {String} type
+ * @param {string} type
  *        MediaGroup type
  * @param {Object} settings
  *        Object containing required information for media groups
@@ -110,7 +110,7 @@ export const onGroupChanged = (type, settings) => () => {
  * destructive reset of the SegmentLoader to ensure we start loading as close to
  * currentTime as possible.
  *
- * @param {String} type
+ * @param {string} type
  *        MediaGroup type
  * @param {Object} settings
  *        Object containing required information for media groups
@@ -138,12 +138,23 @@ export const onTrackChanged = (type, settings) => () => {
     return;
   }
 
-  if (!activeGroup.playlistLoader) {
-    // when switching from demuxed audio/video to muxed audio/video (noted by no playlist
-    // loader for the audio group), we want to do a destructive reset of the main segment
-    // loader and not restart the audio loaders
-    mainSegmentLoader.resetEverything();
-    return;
+  if (type === 'AUDIO') {
+    if (!activeGroup.playlistLoader) {
+      // when switching from demuxed audio/video to muxed audio/video (noted by no
+      // playlist loader for the audio group), we want to do a destructive reset of the
+      // main segment loader and not restart the audio loaders
+      mainSegmentLoader.setAudio(true);
+      // don't have to worry about disabling the audio of the audio segment loader since
+      // it should be stopped
+      mainSegmentLoader.resetEverything();
+      return;
+    }
+
+    // although the segment loader is an audio segment loader, call the setAudio
+    // function to ensure it is prepared to re-append the init segment (or handle other
+    // config changes)
+    segmentLoader.setAudio(true);
+    mainSegmentLoader.setAudio(false);
   }
 
   if (previousActiveLoader === activeGroup.playlistLoader) {
@@ -170,7 +181,7 @@ export const onError = {
    * Returns a function to be called when a SegmentLoader or PlaylistLoader encounters
    * an error.
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {Object} settings
    *        Object containing required information for media groups
@@ -206,7 +217,7 @@ export const onError = {
     videojs.log.warn('Problem encountered loading the alternate audio track.' +
                        'Switching back to default.');
 
-    for (let trackId in mediaType.tracks) {
+    for (const trackId in mediaType.tracks) {
       mediaType.tracks[trackId].enabled = mediaType.tracks[trackId] === defaultTrack;
     }
 
@@ -216,7 +227,7 @@ export const onError = {
    * Returns a function to be called when a SegmentLoader or PlaylistLoader encounters
    * an error.
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {Object} settings
    *        Object containing required information for media groups
@@ -249,7 +260,7 @@ export const setupListeners = {
   /**
    * Setup event listeners for audio playlist loader
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {PlaylistLoader|null} playlistLoader
    *        PlaylistLoader to register listeners on
@@ -295,7 +306,7 @@ export const setupListeners = {
   /**
    * Setup event listeners for subtitle playlist loader
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {PlaylistLoader|null} playlistLoader
    *        PlaylistLoader to register listeners on
@@ -337,15 +348,11 @@ export const setupListeners = {
   }
 };
 
-const byGroupId = (type, groupId) => (playlist) => playlist.attributes[type] === groupId;
-
-const byResolvedUri = (resolvedUri) => (playlist) => playlist.resolvedUri === resolvedUri;
-
 export const initialize = {
   /**
    * Setup PlaylistLoaders and AudioTracks for the audio groups
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {Object} settings
    *        Object containing required information for media groups
@@ -356,8 +363,8 @@ export const initialize = {
       hls,
       sourceType,
       segmentLoaders: { [type]: segmentLoader },
-      requestOptions: { withCredentials },
-      master: { mediaGroups, playlists },
+      requestOptions,
+      master: { mediaGroups },
       mediaTypes: {
         [type]: {
           groups,
@@ -373,51 +380,41 @@ export const initialize = {
       mediaGroups[type] = { main: { default: { default: true } } };
     }
 
-    for (let groupId in mediaGroups[type]) {
+    for (const groupId in mediaGroups[type]) {
       if (!groups[groupId]) {
         groups[groupId] = [];
       }
 
       // List of playlists that have an AUDIO attribute value matching the current
       // group ID
-      const groupPlaylists = playlists.filter(byGroupId(type, groupId));
 
-      for (let variantLabel in mediaGroups[type][groupId]) {
+      for (const variantLabel in mediaGroups[type][groupId]) {
         let properties = mediaGroups[type][groupId][variantLabel];
-
-        // List of playlists for the current group ID that have a matching uri with
-        // this alternate audio variant
-        const matchingPlaylists =
-          groupPlaylists.filter(byResolvedUri(properties.resolvedUri));
-
-        if (matchingPlaylists.length) {
-          // If there is a playlist that has the same uri as this audio variant, assume
-          // that the playlist is audio only. We delete the resolvedUri property here
-          // to prevent a playlist loader from being created so that we don't have
-          // both the main and audio segment loaders loading the same audio segments
-          // from the same playlist.
-          delete properties.resolvedUri;
-        }
-
         let playlistLoader;
 
         if (properties.resolvedUri) {
-          playlistLoader = new PlaylistLoader(properties.resolvedUri,
-                                              hls,
-                                              withCredentials);
+          playlistLoader = new PlaylistLoader(
+            properties.resolvedUri,
+            hls,
+            requestOptions
+          );
         } else if (properties.playlists && sourceType === 'dash') {
-          playlistLoader = new DashPlaylistLoader(properties.playlists[0],
-                                                  hls,
-                                                  withCredentials,
-                                                  masterPlaylistLoader);
+          playlistLoader = new DashPlaylistLoader(
+            properties.playlists[0],
+            hls,
+            requestOptions,
+            masterPlaylistLoader
+          );
         } else {
           // no resolvedUri means the audio is muxed with the video when using this
           // audio track
           playlistLoader = null;
         }
 
-        properties = videojs.mergeOptions({ id: variantLabel, playlistLoader },
-                                          properties);
+        properties = videojs.mergeOptions(
+          { id: variantLabel, playlistLoader },
+          properties
+        );
 
         setupListeners[type](type, properties.playlistLoader, settings);
 
@@ -444,7 +441,7 @@ export const initialize = {
   /**
    * Setup PlaylistLoaders and TextTracks for the subtitle groups
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {Object} settings
    *        Object containing required information for media groups
@@ -456,7 +453,7 @@ export const initialize = {
       hls,
       sourceType,
       segmentLoaders: { [type]: segmentLoader },
-      requestOptions: { withCredentials },
+      requestOptions,
       master: { mediaGroups },
       mediaTypes: {
         [type]: {
@@ -467,12 +464,12 @@ export const initialize = {
       masterPlaylistLoader
     } = settings;
 
-    for (let groupId in mediaGroups[type]) {
+    for (const groupId in mediaGroups[type]) {
       if (!groups[groupId]) {
         groups[groupId] = [];
       }
 
-      for (let variantLabel in mediaGroups[type][groupId]) {
+      for (const variantLabel in mediaGroups[type][groupId]) {
         if (mediaGroups[type][groupId][variantLabel].forced) {
           // Subtitle playlists with the forced attribute are not selectable in Safari.
           // According to Apple's HLS Authoring Specification:
@@ -491,12 +488,14 @@ export const initialize = {
 
         if (sourceType === 'hls') {
           playlistLoader =
-            new PlaylistLoader(properties.resolvedUri, hls, withCredentials);
+            new PlaylistLoader(properties.resolvedUri, hls, requestOptions);
         } else if (sourceType === 'dash') {
-          playlistLoader = new DashPlaylistLoader(properties.playlists[0],
-                                                  hls,
-                                                  withCredentials,
-                                                  masterPlaylistLoader);
+          playlistLoader = new DashPlaylistLoader(
+            properties.playlists[0],
+            hls,
+            requestOptions,
+            masterPlaylistLoader
+          );
         }
 
         properties = videojs.mergeOptions({
@@ -546,13 +545,13 @@ export const initialize = {
       }
     } = settings;
 
-    for (let groupId in mediaGroups[type]) {
+    for (const groupId in mediaGroups[type]) {
       if (!groups[groupId]) {
         groups[groupId] = [];
       }
 
-      for (let variantLabel in mediaGroups[type][groupId]) {
-        let properties = mediaGroups[type][groupId][variantLabel];
+      for (const variantLabel in mediaGroups[type][groupId]) {
+        const properties = mediaGroups[type][groupId][variantLabel];
 
         // We only support CEA608 captions for now, so ignore anything that
         // doesn't use a CCx INSTREAM-ID
@@ -583,7 +582,7 @@ export const initialize = {
 /**
  * Returns a function used to get the active group of the provided type
  *
- * @param {String} type
+ * @param {string} type
  *        MediaGroup type
  * @param {Object} settings
  *        Object containing required information for media groups
@@ -631,7 +630,7 @@ export const activeTrack = {
   /**
    * Returns a function used to get the active track of type provided
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {Object} settings
    *        Object containing required information for media groups
@@ -643,7 +642,7 @@ export const activeTrack = {
   AUDIO: (type, settings) => () => {
     const { mediaTypes: { [type]: { tracks } } } = settings;
 
-    for (let id in tracks) {
+    for (const id in tracks) {
       if (tracks[id].enabled) {
         return tracks[id];
       }
@@ -654,7 +653,7 @@ export const activeTrack = {
   /**
    * Returns a function used to get the active track of type provided
    *
-   * @param {String} type
+   * @param {string} type
    *        MediaGroup type
    * @param {Object} settings
    *        Object containing required information for media groups
@@ -666,7 +665,7 @@ export const activeTrack = {
   SUBTITLES: (type, settings) => () => {
     const { mediaTypes: { [type]: { tracks } } } = settings;
 
-    for (let id in tracks) {
+    for (const id in tracks) {
       if (tracks[id].mode === 'showing') {
         return tracks[id];
       }
@@ -682,12 +681,6 @@ export const activeTrack = {
  *
  * @param {Object} settings
  *        Object containing required information for setting up the media groups
- * @param {SegmentLoader} settings.segmentLoaders.AUDIO
- *        Audio segment loader
- * @param {SegmentLoader} settings.segmentLoaders.SUBTITLES
- *        Subtitle segment loader
- * @param {SegmentLoader} settings.segmentLoaders.main
- *        Main segment loader
  * @param {Tech} settings.tech
  *        The tech of the player
  * @param {Object} settings.requestOptions
@@ -743,19 +736,23 @@ export const setupMediaGroups = (settings) => {
   };
 
   tech.audioTracks().addEventListener('change', onAudioTrackChanged);
-  tech.remoteTextTracks().addEventListener('change',
-    mediaTypes.SUBTITLES.onTrackChanged);
+  tech.remoteTextTracks().addEventListener(
+    'change',
+    mediaTypes.SUBTITLES.onTrackChanged
+  );
 
   hls.on('dispose', () => {
     tech.audioTracks().removeEventListener('change', onAudioTrackChanged);
-    tech.remoteTextTracks().removeEventListener('change',
-      mediaTypes.SUBTITLES.onTrackChanged);
+    tech.remoteTextTracks().removeEventListener(
+      'change',
+      mediaTypes.SUBTITLES.onTrackChanged
+    );
   });
 
   // clear existing audio tracks and add the ones we just created
   tech.clearTracks('audio');
 
-  for (let id in mediaTypes.AUDIO.tracks) {
+  for (const id in mediaTypes.AUDIO.tracks) {
     tech.audioTracks().addTrack(mediaTypes.AUDIO.tracks[id]);
   }
 };

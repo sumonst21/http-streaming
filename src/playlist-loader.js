@@ -5,7 +5,7 @@
  * M3U8 playlists.
  *
  */
-import resolveUrl from './resolve-url';
+import { resolveUrl, resolveManifestRedirect } from './resolve-url';
 import videojs from 'video.js';
 import { Parser as M3u8Parser } from 'm3u8-parser';
 import window from 'global/window';
@@ -23,8 +23,8 @@ const { mergeOptions, EventTarget, log } = videojs;
  */
 export const forEachMediaGroup = (master, callback) => {
   ['AUDIO', 'SUBTITLES'].forEach((mediaType) => {
-    for (let groupKey in master.mediaGroups[mediaType]) {
-      for (let labelKey in master.mediaGroups[mediaType][groupKey]) {
+    for (const groupKey in master.mediaGroups[mediaType]) {
+      for (const labelKey in master.mediaGroups[mediaType][groupKey]) {
         const mediaProperties = master.mediaGroups[mediaType][groupKey][labelKey];
 
         callback(mediaProperties, mediaType, groupKey, labelKey);
@@ -40,7 +40,7 @@ export const forEachMediaGroup = (master, callback) => {
   *
   * @param {Array} original the outdated list of segments
   * @param {Array} update the updated list of segments
-  * @param {Number=} offset the index of the first update
+  * @param {number=} offset the index of the first update
   * segment in the original segment list. For non-live playlists,
   * this should always be zero and does not need to be
   * specified. For live playlists, it should be the difference
@@ -92,11 +92,12 @@ export const updateMaster = (master, media) => {
     return null;
   }
 
-  // consider the playlist unchanged if the number of segments is equal and the media
-  // sequence number is unchanged
+  // consider the playlist unchanged if the number of segments is equal, the media
+  // sequence number is unchanged, and this playlist hasn't become the end of the playlist
   if (playlist.segments &&
       media.segments &&
       playlist.segments.length === media.segments.length &&
+      playlist.endList === media.endList &&
       playlist.mediaSequence === media.mediaSequence) {
     return null;
   }
@@ -135,7 +136,7 @@ export const setupMediaPlaylists = (master) => {
   let i = master.playlists.length;
 
   while (i--) {
-    let playlist = master.playlists[i];
+    const playlist = master.playlists[i];
 
     master.playlists[playlist.uri] = playlist;
     playlist.resolvedUri = resolveUrl(master.uri, playlist.uri);
@@ -167,9 +168,9 @@ export const resolveMediaGroupUris = (master) => {
  *
  * @param {Object} media
  *        The current media
- * @param {Boolean} update
+ * @param {boolean} update
  *        True if there were any updates from the last refresh, false otherwise
- * @return {Number}
+ * @return {number}
  *         The time in ms to wait before refreshing the live playlist
  */
 export const refreshDelay = (media, update) => {
@@ -191,22 +192,25 @@ export const refreshDelay = (media, update) => {
  *
  * @class PlaylistLoader
  * @extends Stream
- * @param {String} srcUrl the url to start with
- * @param {Boolean} withCredentials the withCredentials xhr option
- * @constructor
+ * @param {string} srcUrl the url to start with
+ * @param {boolean} withCredentials the withCredentials xhr option
+ * @class
  */
 export default class PlaylistLoader extends EventTarget {
-  constructor(srcUrl, hls, withCredentials) {
+  constructor(srcUrl, hls, options = { }) {
     super();
+
+    const { withCredentials = false, handleManifestRedirects = false } = options;
 
     this.srcUrl = srcUrl;
     this.hls_ = hls;
     this.withCredentials = withCredentials;
+    this.handleManifestRedirects = handleManifestRedirects;
 
-    const options = hls.options_;
+    const hlsOptions = hls.options_;
 
-    this.customTagParsers = (options && options.customTagParsers) || [];
-    this.customTagMappers = (options && options.customTagMappers) || [];
+    this.customTagParsers = (hlsOptions && hlsOptions.customTagParsers) || [];
+    this.customTagMappers = (hlsOptions && hlsOptions.customTagMappers) || [];
 
     if (!this.srcUrl) {
       throw new Error('A non-empty playlist URL is required');
@@ -234,8 +238,7 @@ export default class PlaylistLoader extends EventTarget {
         }
 
         if (error) {
-          return this.playlistRequestError(
-            this.request, this.media().uri, 'HAVE_METADATA');
+          return this.playlistRequestError(this.request, this.media().uri, 'HAVE_METADATA');
         }
 
         this.haveMetadata(this.request, this.media().uri);
@@ -254,7 +257,7 @@ export default class PlaylistLoader extends EventTarget {
     this.error = {
       playlist: this.master.playlists[url],
       status: xhr.status,
-      message: 'HLS playlist request error at URL: ' + url,
+      message: `HLS playlist request error at URL: ${url}.`,
       responseText: xhr.responseText,
       code: (xhr.status >= 500) ? 4 : 2
     };
@@ -307,12 +310,13 @@ export default class PlaylistLoader extends EventTarget {
     this.trigger('loadedplaylist');
   }
 
-   /**
+  /**
     * Abort any outstanding work and clean up.
     */
   dispose() {
     this.stopRequest();
     window.clearTimeout(this.mediaUpdateTimeout);
+    window.clearTimeout(this.finalRenditionTimeout);
   }
 
   stopRequest() {
@@ -325,7 +329,7 @@ export default class PlaylistLoader extends EventTarget {
     }
   }
 
-   /**
+  /**
     * When called without any arguments, returns the currently
     * active media playlist. When called with a single argument,
     * triggers the playlist loader to asynchronously switch to the
@@ -335,9 +339,11 @@ export default class PlaylistLoader extends EventTarget {
     *
     * @param {Object=} playlist the parsed media playlist
     * object to switch to
+    * @param {boolean=} is this the last available playlist
+    *
     * @return {Playlist} the current loaded media
     */
-  media(playlist) {
+  media(playlist, isFinalRendition) {
     // getter
     if (!playlist) {
       return this.media_;
@@ -348,8 +354,6 @@ export default class PlaylistLoader extends EventTarget {
       throw new Error('Cannot switch media playlist from ' + this.state);
     }
 
-    const startingState = this.state;
-
     // find the playlist object if the target playlist has been
     // specified by URI
     if (typeof playlist === 'string') {
@@ -359,6 +363,17 @@ export default class PlaylistLoader extends EventTarget {
       playlist = this.master.playlists[playlist];
     }
 
+    window.clearTimeout(this.finalRenditionTimeout);
+
+    if (isFinalRendition) {
+      const delay = (playlist.targetDuration / 2) * 1000 || 5 * 1000;
+
+      this.finalRenditionTimeout =
+        window.setTimeout(this.media.bind(this, playlist, false), delay);
+      return;
+    }
+
+    const startingState = this.state;
     const mediaChange = !this.media_ || playlist.uri !== this.media_.uri;
 
     // switch to fully loaded playlists immediately
@@ -389,7 +404,7 @@ export default class PlaylistLoader extends EventTarget {
 
     // there is already an outstanding playlist request
     if (this.request) {
-      if (resolveUrl(this.master.uri, playlist.uri) === this.request.url) {
+      if (playlist.resolvedUri === this.request.url) {
         // requesting to switch to the same playlist multiple times
         // has no effect after the first
         return;
@@ -405,13 +420,15 @@ export default class PlaylistLoader extends EventTarget {
     }
 
     this.request = this.hls_.xhr({
-      uri: resolveUrl(this.master.uri, playlist.uri),
+      uri: playlist.resolvedUri,
       withCredentials: this.withCredentials
     }, (error, req) => {
       // disposed
       if (!this.request) {
         return;
       }
+
+      playlist.resolvedUri = resolveManifestRedirect(this.handleManifestRedirects, playlist.resolvedUri, req);
 
       if (error) {
         return this.playlistRequestError(this.request, playlist.uri, startingState);
@@ -503,7 +520,7 @@ export default class PlaylistLoader extends EventTarget {
       if (error) {
         this.error = {
           status: req.status,
-          message: 'HLS playlist request error at URL: ' + this.srcUrl,
+          message: `HLS playlist request error at URL: ${this.srcUrl}.`,
           responseText: req.responseText,
           // MEDIA_ERR_NETWORK
           code: 2
@@ -526,6 +543,8 @@ export default class PlaylistLoader extends EventTarget {
       parser.end();
 
       this.state = 'HAVE_MASTER';
+
+      this.srcUrl = resolveManifestRedirect(this.handleManifestRedirects, this.srcUrl, req);
 
       parser.manifest.uri = this.srcUrl;
 
@@ -557,14 +576,14 @@ export default class PlaylistLoader extends EventTarget {
         uri: window.location.href,
         playlists: [{
           uri: this.srcUrl,
-          id: 0
+          id: 0,
+          resolvedUri: this.srcUrl,
+          // m3u8-parser does not attach an attributes property to media playlists so make
+          // sure that the property is attached to avoid undefined reference errors
+          attributes: {}
         }]
       };
       this.master.playlists[this.srcUrl] = this.master.playlists[0];
-      this.master.playlists[0].resolvedUri = this.srcUrl;
-      // m3u8-parser does not attach an attributes property to media playlists so make
-      // sure that the property is attached to avoid undefined reference errors
-      this.master.playlists[0].attributes = this.master.playlists[0].attributes || {};
       this.haveMetadata(req, this.srcUrl);
       return this.trigger('loadedmetadata');
     });

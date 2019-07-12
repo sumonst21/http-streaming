@@ -5,17 +5,17 @@
  * License: https://github.com/videojs/videojs-http-streaming/blob/master/LICENSE
  */
 import document from 'global/document';
+import window from 'global/window';
 import PlaylistLoader from './playlist-loader';
 import Playlist from './playlist';
 import xhrFactory from './xhr';
 import { Decrypter, AsyncStream, decrypt } from 'aes-decrypter';
 import * as utils from './bin-utils';
 import {
-  getStreamTime,
-  seekToStreamTime
+  getProgramTime,
+  seekToProgramTime
 } from './util/time';
 import { timeRangesToArray } from './ranges';
-import { MediaSource, URL } from './mse/index';
 import videojs from 'video.js';
 import { MasterPlaylistController } from './master-playlist-controller';
 import Config from './config';
@@ -102,7 +102,7 @@ const simpleTypeFromSourceType = (type) => {
  * @function handleHlsMediaChange
  */
 const handleHlsMediaChange = function(qualityLevels, playlistLoader) {
-  let newPlaylist = playlistLoader.media();
+  const newPlaylist = playlistLoader.media();
   let selectedIndex = -1;
 
   for (let i = 0; i < qualityLevels.length; i++) {
@@ -148,7 +148,7 @@ const emeKeySystems = (keySystemOptions, videoPlaylist, audioPlaylist) => {
   // upsert the content types based on the selected playlist
   const keySystemContentTypes = {};
 
-  for (let keySystem in keySystemOptions) {
+  for (const keySystem in keySystemOptions) {
     keySystemContentTypes[keySystem] = {
       audioContentType: `audio/mp4; codecs="${audioPlaylist.attributes.CODECS}"`,
       videoContentType: `video/mp4; codecs="${videoPlaylist.attributes.CODECS}"`
@@ -240,7 +240,7 @@ const updateVhsLocalStorage = (options) => {
  * Whether the browser has built-in HLS support.
  */
 Hls.supportsNativeHls = (function() {
-  let video = document.createElement('video');
+  const video = document.createElement('video');
 
   // native HLS is definitely not supported if HTML5 video isn't
   if (!videojs.getTech('Html5').isSupported()) {
@@ -248,7 +248,7 @@ Hls.supportsNativeHls = (function() {
   }
 
   // HLS manifests can go by many mime-types
-  let canPlay = [
+  const canPlay = [
     // Apple santioned
     'application/vnd.apple.mpegurl',
     // Apple sanctioned for backwards compatibility
@@ -273,8 +273,7 @@ Hls.supportsNativeDash = (function() {
     return false;
   }
 
-  return (/maybe|probably/i).test(
-    document.createElement('video').canPlayType('application/dash+xml'));
+  return (/maybe|probably/i).test(document.createElement('video').canPlayType('application/dash+xml'));
 }());
 
 Hls.supportsTypeNatively = (type) => {
@@ -317,7 +316,7 @@ class HlsHandler extends Component {
     // tech.player() is deprecated but setup a reference to HLS for
     // backwards-compatibility
     if (tech.options_ && tech.options_.playerId) {
-      let _player = videojs(tech.options_.playerId);
+      const _player = videojs(tech.options_.playerId);
 
       if (!_player.hasOwnProperty('hls')) {
         Object.defineProperty(_player, 'hls', {
@@ -366,7 +365,7 @@ class HlsHandler extends Component {
       'fullscreenchange', 'webkitfullscreenchange',
       'mozfullscreenchange', 'MSFullscreenChange'
     ], (event) => {
-      let fullscreenElement = document.fullscreenElement ||
+      const fullscreenElement = document.fullscreenElement ||
         document.webkitFullscreenElement ||
         document.mozFullScreenElement ||
         document.msFullscreenElement;
@@ -378,7 +377,7 @@ class HlsHandler extends Component {
 
     // Handle seeking when looping - middleware doesn't handle this seek event from the tech
     this.on(this.tech_, 'seeking', function() {
-      if (this.tech_.seeking() && this.tech_.currentTime() === 0 && this.tech_.player_.loop()) {
+      if (this.tech_.currentTime() === 0 && this.tech_.player_.loop()) {
         this.setCurrentTime(0);
       }
     });
@@ -395,6 +394,7 @@ class HlsHandler extends Component {
   setOptions_() {
     // defaults
     this.options_.withCredentials = this.options_.withCredentials || false;
+    this.options_.handleManifestRedirects = this.options_.handleManifestRedirects || false;
     this.options_.limitRenditionByPlayerDimensions = this.options_.limitRenditionByPlayerDimensions === false ? false : true;
     this.options_.smoothQualityChange = this.options_.smoothQualityChange || false;
     this.options_.useBandwidthFromLocalStorage =
@@ -403,6 +403,8 @@ class HlsHandler extends Component {
         this.options_.useBandwidthFromLocalStorage || false;
     this.options_.customTagParsers = this.options_.customTagParsers || [];
     this.options_.customTagMappers = this.options_.customTagMappers || [];
+    this.options_.cacheEncryptionKeys = this.options_.cacheEncryptionKeys || false;
+    this.options_.handlePartialData = this.options_.handlePartialData || false;
 
     if (typeof this.options_.blacklistDuration !== 'number') {
       this.options_.blacklistDuration = 5 * 60;
@@ -422,7 +424,7 @@ class HlsHandler extends Component {
         }
       }
     }
-     // if bandwidth was not set by options or pulled from local storage, start playlist
+    // if bandwidth was not set by options or pulled from local storage, start playlist
     // selection at a reasonable bandwidth
     if (typeof this.options_.bandwidth !== 'number') {
       this.options_.bandwidth = Config.INITIAL_BANDWIDTH;
@@ -441,7 +443,10 @@ class HlsHandler extends Component {
       'bandwidth',
       'smoothQualityChange',
       'customTagParsers',
-      'customTagMappers'
+      'customTagMappers',
+      'handleManifestRedirects',
+      'cacheEncryptionKeys',
+      'handlePartialData'
     ].forEach((option) => {
       if (typeof this.source_[option] !== 'undefined') {
         this.options_[option] = this.source_[option];
@@ -475,14 +480,13 @@ class HlsHandler extends Component {
     };
 
     this.masterPlaylistController_ = new MasterPlaylistController(this.options_);
-    this.playbackWatcher_ = new PlaybackWatcher(
-      videojs.mergeOptions(this.options_, {
-        seekable: () => this.seekable(),
-        media: () => this.masterPlaylistController_.media()
-      }));
+    this.playbackWatcher_ = new PlaybackWatcher(videojs.mergeOptions(this.options_, {
+      seekable: () => this.seekable(),
+      media: () => this.masterPlaylistController_.media()
+    }));
 
     this.masterPlaylistController_.on('error', () => {
-      let player = videojs.players[this.tech_.options_.playerId];
+      const player = videojs.players[this.tech_.options_.playerId];
 
       player.error(this.masterPlaylistController_.error);
     });
@@ -549,7 +553,7 @@ class HlsHandler extends Component {
        */
       systemBandwidth: {
         get() {
-          let invBandwidth = 1 / (this.bandwidth || 1);
+          const invBandwidth = 1 / (this.bandwidth || 1);
           let invThroughput;
 
           if (this.throughput > 0) {
@@ -558,7 +562,7 @@ class HlsHandler extends Component {
             invThroughput = 0;
           }
 
-          let systemBitrate = Math.floor(1 / (invBandwidth + invThroughput));
+          const systemBitrate = Math.floor(1 / (invBandwidth + invThroughput));
 
           return systemBitrate;
         },
@@ -650,8 +654,10 @@ class HlsHandler extends Component {
       }
     });
 
-    this.tech_.one('canplay',
-      this.masterPlaylistController_.setupFirstPlay.bind(this.masterPlaylistController_));
+    this.tech_.one(
+      'canplay',
+      this.masterPlaylistController_.setupFirstPlay.bind(this.masterPlaylistController_)
+    );
 
     this.tech_.on('bandwidthupdate', () => {
       if (this.options_.useBandwidthFromLocalStorage) {
@@ -682,8 +688,7 @@ class HlsHandler extends Component {
       return;
     }
 
-    this.tech_.src(videojs.URL.createObjectURL(
-      this.masterPlaylistController_.mediaSource));
+    this.tech_.src(window.URL.createObjectURL(this.masterPlaylistController_.mediaSource));
   }
 
   /**
@@ -693,7 +698,7 @@ class HlsHandler extends Component {
    * @private
    */
   setupQualityLevels_() {
-    let player = videojs.players[this.tech_.options_.playerId];
+    const player = videojs.players[this.tech_.options_.playerId];
 
     if (player && player.qualityLevels) {
       this.qualityLevels_ = player.qualityLevels();
@@ -763,8 +768,8 @@ class HlsHandler extends Component {
     super.dispose();
   }
 
-  convertToStreamTime(time, callback) {
-    return getStreamTime({
+  convertToProgramTime(time, callback) {
+    return getProgramTime({
       playlist: this.masterPlaylistController_.media(),
       time,
       callback
@@ -772,9 +777,9 @@ class HlsHandler extends Component {
   }
 
   // the player must be playing before calling this
-  seekToStreamTime(streamTime, callback, pauseAfterSeek = true, retryCount = 2) {
-    return seekToStreamTime({
-      streamTime,
+  seekToProgramTime(programTime, callback, pauseAfterSeek = true, retryCount = 2) {
+    return seekToProgramTime({
+      programTime,
       playlist: this.masterPlaylistController_.media(),
       retryCount,
       pauseAfterSeek,
@@ -796,12 +801,12 @@ const HlsSourceHandler = {
   name: 'videojs-http-streaming',
   VERSION: version,
   canHandleSource(srcObj, options = {}) {
-    let localOptions = videojs.mergeOptions(videojs.options, options);
+    const localOptions = videojs.mergeOptions(videojs.options, options);
 
     return HlsSourceHandler.canPlayType(srcObj.type, localOptions);
   },
   handleSource(source, tech, options = {}) {
-    let localOptions = videojs.mergeOptions(videojs.options, options);
+    const localOptions = videojs.mergeOptions(videojs.options, options);
 
     tech.hls = new HlsHandler(source, tech, localOptions);
     tech.hls.xhr = xhrFactory();
@@ -819,14 +824,19 @@ const HlsSourceHandler = {
   }
 };
 
-if (typeof videojs.MediaSource === 'undefined' ||
-    typeof videojs.URL === 'undefined') {
-  videojs.MediaSource = MediaSource;
-  videojs.URL = URL;
-}
+/**
+ * Check to see if the native MediaSource object exists and supports
+ * an MP4 container with both H.264 video and AAC-LC audio.
+ *
+ * @return {boolean} if  native media sources are supported
+ */
+const supportsNativeMediaSources = () => {
+  return !!window.MediaSource && !!window.MediaSource.isTypeSupported &&
+    window.MediaSource.isTypeSupported('video/mp4;codecs="avc1.4d400d,mp4a.40.2"');
+};
 
 // register source handlers with the appropriate techs
-if (MediaSource.supportsNativeMediaSources()) {
+if (supportsNativeMediaSources()) {
   videojs.getTech('Html5').registerSourceHandler(HlsSourceHandler, 0);
 }
 
